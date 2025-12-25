@@ -2,108 +2,136 @@ import streamlit as st
 import pandas as pd
 import io
 
-# --- 核心配置 ---
-# 这里定义你的列名，如果表格列名不同，请修改这里
-COL_COMMENT = '顾客评论'  # 评论内容的列名
-COL_RATING = '星级'      # 星级的列名
-COL_OUTPUT = '分析标签'  # 新生成的标签列名
+# --- 页面基础设置 ---
+st.set_page_config(page_title="评论自动打标工具", layout="wide", page_icon="🏷️")
 
-def process_data(file_buffer):
+# --- 核心分析函数 ---
+def analyze_reviews(df_main, df_good, df_bad, col_review, col_rating):
     """
-    核心处理逻辑：读取上传的Excel流，进行打标，返回处理后的DataFrame
+    根据星级分流，分别匹配好评库和差评库
     """
-    try:
-        # 1. 读取所有需要的Sheet
-        # 这里的sheet_name=None会读取所有sheet，或者指定索引0,1,2
-        xls = pd.ExcelFile(file_buffer)
-        
-        # 假设 Sheet1=数据, Sheet2=好评库, Sheet3=差评库
-        # 如果你的Sheet名是固定的，建议直接用 names=['Sheet1', '好评', '差评']
-        sheet_names = xls.sheet_names
-        if len(sheet_names) < 3:
-            return None, "错误：Excel文件必须至少包含3个Sheet（数据表、好评表、差评表）"
-            
-        df_main = pd.read_excel(xls, sheet_name=0)      # 主数据
-        df_good_tags = pd.read_excel(xls, sheet_name=1) # 好评库
-        df_bad_tags = pd.read_excel(xls, sheet_name=2)  # 差评库
-        
-        # 检查必要列是否存在
-        if COL_COMMENT not in df_main.columns or COL_RATING not in df_main.columns:
-            return None, f"错误：第一张表中未找到列名 '{COL_COMMENT}' 或 '{COL_RATING}'"
-
-        # 提取标签列表（转为字符串并去空）
-        good_tags = df_good_tags.iloc[:, 0].dropna().astype(str).tolist()
-        bad_tags = df_bad_tags.iloc[:, 0].dropna().astype(str).tolist()
-
-    except Exception as e:
-        return None, f"文件读取失败: {str(e)}"
-
-    # 2. 定义单行打标逻辑
+    # 1. 准备标签库 (转为列表并过滤空值)
+    # 假设标签都在第一列
+    good_tags = df_good.iloc[:, 0].dropna().astype(str).tolist()
+    bad_tags = df_bad.iloc[:, 0].dropna().astype(str).tolist()
+    
+    # 2. 定义单行处理逻辑
     def get_tag(row):
-        comment = str(row[COL_COMMENT]) if pd.notna(row[COL_COMMENT]) else ""
-        rating = row[COL_RATING]
+        # 获取评论内容，转为字符串，如果是空则为空字符串
+        content = str(row[col_review]) if pd.notna(row[col_review]) else ""
         
-        if not comment: return None
-        
-        # 确保星级是数字
+        # 获取星级
         try:
-            rating = float(rating)
+            rating = float(row[col_rating])
         except:
-            return None 
+            return None # 星级格式不对，跳过
 
-        # 逻辑分流：1-3星查差评库，4-5星查好评库
+        matched_tag = None
         target_tags = []
-        if 4 <= rating <= 5:
+
+        # --- 核心逻辑：星级分流 ---
+        if rating >= 4:
+            # 4-5星：只匹配好评词
             target_tags = good_tags
-        elif 1 <= rating <= 3:
+        elif rating <= 3:
+            # 1-3星：只匹配差评词
             target_tags = bad_tags
         else:
-            return None # 星级异常
-            
-        # 匹配标签
+            return None # 其他情况不打标
+
+        # --- 关键词匹配 ---
+        # 遍历对应的标签库，看哪个词出现在了评论里
         for tag in target_tags:
-            if tag in comment:
-                return tag # 找到第一个即返回
-        return None # 没匹配到
+            if tag in content:
+                matched_tag = tag
+                break # 找到第一个匹配的就停止 (如需匹配多个可修改此处)
+        
+        return matched_tag
 
-    # 3. 应用逻辑
-    df_main[COL_OUTPUT] = df_main.apply(get_tag, axis=1)
+    # 3. 应用逻辑到每一行
+    # 使用 .copy() 防止报警
+    df_result = df_main.copy()
+    df_result['分析标签'] = df_result.apply(get_tag, axis=1)
     
-    return df_main, "Success"
+    return df_result
 
-# --- 网页界面构建 (Streamlit) ---
-st.set_page_config(page_title="评论自动打标工具", layout="wide")
-
-st.title("📊 顾客评论自动打标系统")
+# --- 界面显示 ---
+st.title("🏷️ 亚马逊评论自动打标神器")
 st.markdown("""
 **使用说明：**
-1. 上传 Excel 文件。
-2. **Sheet1**: 包含顾客评论和星级数据。
-3. **Sheet2**: 好评标签库 | **Sheet3**: 差评标签库。
-4. 系统会自动根据 1-3星(差评) 和 4-5星(好评) 的逻辑匹配标签。
+请上传一个 **Excel (.xlsx)** 文件，文件内必须包含 **3个工作表 (Sheets)**：
+1.  **Sheet 1 (数据源)**：包含顾客评论和星级的原始数据。
+2.  **Sheet 2 (好评库)**：包含所有好评标签（如：舒适、透气）。
+3.  **Sheet 3 (差评库)**：包含所有差评标签（如：偏小、魔术贴失效）。
 """)
 
-uploaded_file = st.file_uploader("请上传 Excel 文件 (.xlsx)", type=['xlsx'])
+# --- 文件上传区 ---
+uploaded_file = st.file_uploader("请将整理好的 Excel 文件拖拽到此处", type=['xlsx'])
 
-if uploaded_file is not None:
-    with st.spinner('正在分析数据，请稍候...'):
-        result_df, msg = process_data(uploaded_file)
+if uploaded_file:
+    try:
+        # 读取 Excel 文件
+        xls = pd.ExcelFile(uploaded_file)
+        sheet_names = xls.sheet_names
         
-        if result_df is not None:
-            st.success("✅ 处理完成！预览前5行如下：")
-            
-            # 展示预览
-            st.dataframe(result_df.head())
-            
-            # --- 转换为 CSV 供下载 ---
-            # 使用 utf-8-sig 编码以防止 Excel 打开中文乱码
-            csv = result_df.to_csv(index=False).encode('utf-8-sig')
-            
-            st.download_button(
-                label="📥 下载 CSV 结果文件",
-                data=csv,
-                file_name='tagged_analysis_result.csv',
-                mime='text/csv',
-            )
+        if len(sheet_names) < 3:
+            st.error(f"❌ 文件格式错误：检测到只有 {len(sheet_names)} 个Sheet。请确保文件包含：数据表、好评表、差评表。")
         else:
-            st.error(msg)
+            # 读取三个表
+            df_main = pd.read_excel(xls, sheet_name=0)      # 主数据
+            df_good = pd.read_excel(xls, sheet_name=1)      # 好评库
+            df_bad = pd.read_excel(xls, sheet_name=2)       # 差评库
+            
+            st.success(f"✅ 文件读取成功！包含 {len(df_main)} 条评论数据。")
+            
+            # --- 列名映射配置区 ---
+            st.write("---")
+            st.subheader("🛠️ 第一步：请确认关键列名")
+            
+            col1, col2 = st.columns(2)
+            
+            # 获取所有列名
+            all_columns = df_main.columns.tolist()
+            
+            with col1:
+                # 智能预选：查找包含 "内容", "评论", "Review" 的列
+                default_review = next((i for i, c in enumerate(all_columns) if any(x in str(c).lower() for x in ['内容', '评论', 'review', 'content'])), 0)
+                selected_review_col = st.selectbox("请选择【评论内容】所在的列：", all_columns, index=default_review)
+            
+            with col2:
+                # 智能预选：查找包含 "星", "分", "Rating" 的列
+                default_rating = next((i for i, c in enumerate(all_columns) if any(x in str(c).lower() for x in ['星', '分', 'rating'])), 0)
+                selected_rating_col = st.selectbox("请选择【星级/评分】所在的列：", all_columns, index=default_rating)
+
+            # --- 执行分析 ---
+            if st.button("🚀 开始自动打标", type="primary"):
+                with st.spinner('正在逐条分析评论，请稍候...'):
+                    # 调用分析函数
+                    result_df = analyze_reviews(df_main, df_good, df_bad, selected_review_col, selected_rating_col)
+                    
+                    # 统计结果
+                    tagged_count = result_df['分析标签'].notna().sum()
+                    total_count = len(result_df)
+                    
+                    st.write("---")
+                    st.subheader("📊 分析结果")
+                    st.info(f"共分析 {total_count} 条数据，成功打标 **{tagged_count}** 条。")
+                    
+                    # 预览前 10 行
+                    st.dataframe(result_df.head(10))
+                    
+                    # --- 下载区 ---
+                    output = io.BytesIO()
+                    # 导出为 CSV，使用 utf-8-sig 防止中文乱码
+                    result_df.to_csv(output, index=False, encoding='utf-8-sig')
+                    output.seek(0)
+                    
+                    st.download_button(
+                        label="📥 下载打标后的 CSV 文件",
+                        data=output,
+                        file_name="Review_Analysis_Result.csv",
+                        mime="text/csv"
+                    )
+
+    except Exception as e:
+        st.error(f"发生未知错误，请检查文件格式: {e}")
