@@ -1,63 +1,145 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
+import io
 
-# 1. 读取数据
-# 请替换为你本地的实际文件名
-main_file = 'B0DNN8BWY8-US-Reviews-251224-531094.xlsx - B0DNN8BWY8-Review(760).csv'
-good_tags_file = 'B0DNN8BWY8-US-Reviews-251224-531094.xlsx - 好评点.csv'
-bad_tags_file = 'B0DNN8BWY8-US-Reviews-251224-531094.xlsx - 差评点.csv'
+# --- 页面配置 ---
+st.set_page_config(page_title="评论自动打标工具 (修复版)", layout="wide", page_icon="🏷️")
 
-# 读取主文件
-df_main = pd.read_csv(main_file)
+# --- 状态管理 ---
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+if 'df_main' not in st.session_state:
+    st.session_state.df_main = None
+if 'df_good' not in st.session_state:
+    st.session_state.df_good = None
+if 'df_bad' not in st.session_state:
+    st.session_state.df_bad = None
 
-# 读取标签库 (假设没有表头，第一列即为标签)
-# 标签格式处理：将 "舒适/佩戴舒适" 拆分为 ["舒适", "佩戴舒适"]
-def load_and_process_tags(file_path):
-    raw_tags = pd.read_csv(file_path, header=None, names=['tag'])['tag'].dropna().astype(str).tolist()
-    processed = []
-    for tag in raw_tags:
-        # 使用 '/' 拆分同义词，但保留原始标签作为最终打标结果
-        keywords = [k.strip() for k in tag.split('/') if k.strip()]
-        processed.append((tag, keywords))
-    return processed
+# --- 核心分析函数 (已修复匹配逻辑) ---
+def analyze_reviews(df_main, df_good, df_bad, col_review, col_rating):
+    # 1. 准备标签库
+    # 这里我们不做简单的 tolist()，而是预处理，把 "A/B" 拆分成关键词列表
+    def process_tags(df):
+        raw_tags = df.iloc[:, 0].dropna().astype(str).tolist()
+        processed = []
+        for tag in raw_tags:
+            # 将标签按 '/' 拆分，去除首尾空格
+            # 例如: "舒适/佩戴舒适" -> keywords: ["舒适", "佩戴舒适"]
+            keywords = [k.strip() for k in tag.split('/') if k.strip()]
+            if keywords:
+                # 存入元组: (原始标签名, [关键词1, 关键词2...])
+                processed.append((tag, keywords))
+        return processed
 
-good_tags_processed = load_and_process_tags(good_tags_file)
-bad_tags_processed = load_and_process_tags(bad_tags_file)
-
-# 2. 定义打标函数
-def get_tag(row):
-    try:
-        rating = float(row['星级'])
-    except:
-        return "" # 评分格式错误则不处理
+    good_tags_processed = process_tags(df_good)
+    bad_tags_processed = process_tags(df_bad)
     
-    # 核心：使用【内容(翻译)】列进行匹配
-    text = str(row['内容(翻译)']) if pd.notna(row['内容(翻译)']) else ""
-    if not text:
-        return ""
-    
-    target_list = []
-    
-    # 星级分流逻辑
-    if rating >= 4:
-        target_list = good_tags_processed
-    elif rating <= 3:
-        target_list = bad_tags_processed
-    else:
-        return ""
+    # 2. 定义单行打标逻辑
+    def get_tag(row):
+        # 获取评论内容，转为字符串
+        content = str(row[col_review]) if pd.notna(row[col_review]) else ""
         
-    # 关键词匹配
-    for tag_label, keywords in target_list:
-        # 只要评论中包含该标签下的【任意一个】关键词，即命中
-        if any(kw in text for kw in keywords):
-            return tag_label # 找到第一个匹配的标签即返回
+        # 获取星级 (容错处理)
+        try:
+            rating = float(row[col_rating])
+        except:
+            return None 
+
+        matched_tag = None
+        target_list = []
+
+        # 星级分流
+        if rating >= 4:
+            target_list = good_tags_processed
+        elif rating <= 3:
+            target_list = bad_tags_processed
+        else:
+            return None 
+
+        # --- 增强版匹配逻辑 ---
+        # 遍历每一个标签组
+        for original_label, keywords in target_list:
+            # 检查该标签下的【任意一个】关键词是否出现在评论中
+            for kw in keywords:
+                if kw in content:
+                    matched_tag = original_label
+                    return matched_tag # 找到一个就立刻返回，不再继续找
+        
+        return None
+
+    # 3. 执行
+    df_result = df_main.copy()
+    df_result['分析标签'] = df_result.apply(get_tag, axis=1)
+    
+    return df_result, None
+
+# --- 主界面 ---
+st.title("🏷️ 评论自动打标神器 (增强匹配版)")
+st.info("💡 修复说明：已优化算法。现在标签如 '舒适/佩戴舒适' 会自动拆分为 '舒适' 或 '佩戴舒适' 进行匹配，确保能打上标签。")
+
+# 文件上传
+uploaded_file = st.file_uploader("上传 Excel 文件 (包含3个Sheet)", type=['xlsx'], key="uploader")
+
+# 数据加载
+if uploaded_file:
+    try:
+        if not st.session_state.data_loaded:
+            xls = pd.ExcelFile(uploaded_file)
+            if len(xls.sheet_names) < 3:
+                st.error("❌ 文件必须包含至少3个Sheet (数据, 好评, 差评)")
+            else:
+                st.session_state.df_main = pd.read_excel(xls, sheet_name=0)
+                st.session_state.df_good = pd.read_excel(xls, sheet_name=1)
+                st.session_state.df_bad = pd.read_excel(xls, sheet_name=2)
+                st.session_state.data_loaded = True
+                st.rerun()
+    except Exception as e:
+        st.error(f"读取失败: {e}")
+
+# 重置逻辑
+if not uploaded_file and st.session_state.data_loaded:
+    st.session_state.data_loaded = False
+    st.session_state.df_main = None
+    st.rerun()
+
+# 分析区
+if st.session_state.data_loaded and st.session_state.df_main is not None:
+    df = st.session_state.df_main
+    cols = df.columns.tolist()
+    
+    st.write("---")
+    c1, c2 = st.columns(2)
+    
+    # 智能选择列名 (优先找 '翻译' 或 '内容')
+    # 你的文件里有 '内容(翻译)'，我们会优先匹配它
+    idx_review = next((i for i, c in enumerate(cols) if any(x in str(c) for x in ['翻译', '内容', 'review'])), 0)
+    col_review = c1.selectbox("选择【评论内容】列", cols, index=idx_review, key="sel_rev")
+    
+    idx_rating = next((i for i, c in enumerate(cols) if any(x in str(c) for x in ['星', 'Rating'])), 0)
+    col_rating = c2.selectbox("选择【星级】列", cols, index=idx_rating, key="sel_rate")
+
+    if st.button("🚀 开始打标", type="primary"):
+        with st.spinner("正在拆分关键词并匹配..."):
+            res, err = analyze_reviews(
+                st.session_state.df_main,
+                st.session_state.df_good,
+                st.session_state.df_bad,
+                col_review,
+                col_rating
+            )
             
-    return "" # 无匹配则留空
-
-# 3. 执行并保存
-df_main['分析标签'] = df_main.apply(get_tag, axis=1)
-
-# 保存为 CSV (utf-8-sig 防止中文乱码)
-df_main.to_csv('tagged_reviews_result.csv', index=False, encoding='utf-8-sig')
-
-print("打标完成！已保存为 tagged_reviews_result.csv")
+            if err:
+                st.error(err)
+            else:
+                # 统计结果
+                count = res['分析标签'].notna().sum()
+                st.success(f"打标完成！共有 **{count}** 条评论成功匹配到标签。")
+                
+                # 预览前10行有标签的数据
+                st.write("结果预览 (仅展示已打标数据):")
+                st.dataframe(res[res['分析标签'].notna()].head())
+                
+                # 下载
+                out = io.BytesIO()
+                res.to_csv(out, index=False, encoding='utf-8-sig')
+                st.download_button("📥 下载结果 CSV", out, "tagged_result.csv", "text/csv")
